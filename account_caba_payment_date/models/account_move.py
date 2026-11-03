@@ -3,7 +3,7 @@
 
 from markupsafe import Markup
 
-from odoo import _, models
+from odoo import models
 from odoo.tools import format_date
 
 
@@ -30,7 +30,7 @@ class AccountMove(models.Model):
             if not expected_date or move.date == expected_date:
                 continue
             body = Markup(
-                _(
+                self.env._(
                     "The VAT cash basis journal entry was generated with a date "
                     "different from the source documents because the accounting "
                     "period of the expected date was closed."

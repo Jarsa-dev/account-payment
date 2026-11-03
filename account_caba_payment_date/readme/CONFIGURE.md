@@ -5,7 +5,8 @@ To configure the behavior when the payment date falls in a locked period:
    Policy*:
    - *Block the reconciliation* (default)
    - *Use the first open date*
-   - *Keep the standard behavior*
+   - *Keep the standard behavior* (since Odoo 20.0 it gives the same date
+     as *Use the first open date*)
 
 To configure the date of the cash basis entry of vendor bills, in the same
 section select the *Cash Basis Purchase Date*:

@@ -5,7 +5,7 @@ from datetime import date
 
 from markupsafe import Markup
 
-from odoo import _, fields, models
+from odoo import fields, models
 from odoo.tools import format_date
 
 # Private key used to carry the "expected date" of a shifted exchange
@@ -36,10 +36,11 @@ class AccountMoveLine(models.Model):
         move_company = self.company_id[:1] or company
         if not move_company:
             return vals
+        journal = self.env["account.journal"].browse(move_values.get("journal_id"))
         lock_date = max(
             move_company.with_context(
                 cash_basis_check_tax_lock=True
-            )._get_user_fiscal_lock_date(),
+            )._get_user_fiscal_lock_date(journal),
             date.min,
         )
         expected_date = move_values.get("date")
@@ -66,7 +67,7 @@ class AccountMoveLine(models.Model):
             if not expected_date:
                 continue
             body = Markup(
-                _(
+                self.env._(
                     "The exchange rate difference journal entry inherited the "
                     "operation date because the accounting period of the "
                     "expected date was closed."

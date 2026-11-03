@@ -3,7 +3,7 @@
 
 from dateutil.relativedelta import relativedelta
 
-from odoo import fields
+from odoo import Command, fields
 from odoo.tests import tagged
 
 from odoo.addons.account.tests.common import AccountTestInvoicingCommon
@@ -11,16 +11,18 @@ from odoo.addons.account.tests.common import AccountTestInvoicingCommon
 
 @tagged("post_install", "-at_install")
 class TestCabaLockDate(AccountTestInvoicingCommon):
-    """Document-vs-document reconciliation (e.g. credit note applied to an
-    invoice) when the period of the source documents is closed.
+    """Payment of an invoice when the period of the payment is closed
+    through the tax lock date.
 
-    These flows have no bank/cash entry, so the payment-date rewrite keeps the
-    standard date. With the ``standard`` lock policy, the cash basis entry must
-    be generated on the operation date (today) instead of being refused."""
+    With the ``standard`` lock policy, the cash basis entry must be generated
+    on the first day after the lock date instead of inside the tax-locked
+    period. Since Odoo 20.0, reconciling two documents without payment (e.g.
+    a credit note applied to an invoice) no longer generates cash basis
+    entries."""
 
     @classmethod
-    def setUpClass(cls, chart_template_ref=None):
-        super().setUpClass(chart_template_ref=chart_template_ref)
+    def setUpClass(cls):
+        super().setUpClass()
         company = cls.company_data["company"]
         # Enable cash basis at company level, otherwise no cash basis entry is
         # generated on reconciliation (see account_move_line.is_cash_basis_needed).
@@ -32,7 +34,7 @@ class TestCabaLockDate(AccountTestInvoicingCommon):
                 "code": "cb.base.account",
                 "name": "cash_basis_base_account",
                 "account_type": "income",
-                "company_id": company.id,
+                "company_ids": [Command.set(company.ids)],
             }
         )
         company.account_cash_basis_base_account_id = cls.cash_basis_base_account
@@ -43,7 +45,7 @@ class TestCabaLockDate(AccountTestInvoicingCommon):
                 "name": "cash_basis_transfer_account",
                 "account_type": "income",
                 "reconcile": True,
-                "company_id": company.id,
+                "company_ids": [Command.set(company.ids)],
             }
         )
         cls.tax_account = cls.env["account.account"].create(
@@ -51,7 +53,7 @@ class TestCabaLockDate(AccountTestInvoicingCommon):
                 "code": "cb.tax.account",
                 "name": "cash_basis_tax_account",
                 "account_type": "income",
-                "company_id": company.id,
+                "company_ids": [Command.set(company.ids)],
             }
         )
         company.tax_cash_basis_journal_id = cls.company_data["default_journal_misc"]
@@ -92,9 +94,9 @@ class TestCabaLockDate(AccountTestInvoicingCommon):
         # Dates relative to "today" so the test is independent from the run date.
         cls.today = fields.Date.context_today(cls.env.user)
         cls.invoice_date = cls.today - relativedelta(days=40)
-        cls.refund_date = cls.today - relativedelta(days=20)
-        # Lock date between the most recent document and today: the period of
-        # both documents is closed, but today is still postable.
+        cls.payment_date = cls.today - relativedelta(days=20)
+        # Lock date between the payment and today: the period of the invoice
+        # and the payment is closed, but today is still postable.
         cls.lock_date = cls.today - relativedelta(days=5)
 
         cls.invoice = cls.init_invoice(
@@ -104,59 +106,48 @@ class TestCabaLockDate(AccountTestInvoicingCommon):
             taxes=cls.cash_basis_tax,
             post=True,
         )
-        cls.refund = cls.init_invoice(
-            "out_refund",
-            invoice_date=cls.refund_date,
-            amounts=[1000.0],
-            taxes=cls.cash_basis_tax,
-            post=True,
-        )
 
     def _get_cash_basis_moves(self):
         return self.env["account.move"].search(
-            [
-                (
-                    "tax_cash_basis_origin_move_id",
-                    "in",
-                    (self.invoice + self.refund).ids,
-                )
-            ]
+            [("tax_cash_basis_origin_move_id", "=", self.invoice.id)]
         )
 
-    def _reconcile_receivables(self):
-        lines = (self.invoice + self.refund).line_ids.filtered(
-            lambda line: line.account_id.account_type == "asset_receivable"
+    def _register_payment(self):
+        return (
+            self.env["account.payment.register"]
+            .with_context(active_model="account.move", active_ids=self.invoice.ids)
+            .create({"payment_date": self.payment_date})
+            ._create_payments()
         )
-        lines.reconcile()
 
     def test_cash_basis_date_shifted_when_period_closed(self):
-        """The cash basis entry is generated on the operation date (today) when
-        the tax period of the source documents is closed."""
+        """The cash basis entry is generated on the first day after the lock
+        date when the tax period of the payment is closed."""
         self.company_data["company"].tax_lock_date = self.lock_date
 
-        self._reconcile_receivables()
+        self._register_payment()
 
         cash_basis_moves = self._get_cash_basis_moves()
         self.assertTrue(cash_basis_moves, "No cash basis entry was generated")
         for move in cash_basis_moves:
             self.assertEqual(
                 move.date,
-                self.today,
-                "The cash basis entry should use the operation date (today)",
+                self.lock_date + relativedelta(days=1),
+                "The cash basis entry should use the first open date",
             )
 
     def test_cash_basis_date_standard_when_period_open(self):
-        """Without a lock date, Odoo's standard behaviour is preserved: the
-        cash basis entry keeps the date of the most recent document."""
-        self._reconcile_receivables()
+        """Without a lock date, the cash basis entry is dated on the payment
+        date."""
+        self._register_payment()
 
         cash_basis_moves = self._get_cash_basis_moves()
         self.assertTrue(cash_basis_moves, "No cash basis entry was generated")
         for move in cash_basis_moves:
-            self.assertNotEqual(
+            self.assertEqual(
                 move.date,
-                self.today,
-                "Without a lock date the standard document date must be kept",
+                self.payment_date,
+                "Without a lock date the payment date must be kept",
             )
 
     def test_chatter_traceability_messages(self):
@@ -165,7 +156,7 @@ class TestCabaLockDate(AccountTestInvoicingCommon):
         self.company_data["company"].tax_lock_date = self.lock_date
 
         invoice_messages_before = len(self.invoice.message_ids)
-        self._reconcile_receivables()
+        self._register_payment()
 
         cash_basis_moves = self._get_cash_basis_moves()
         self.assertTrue(cash_basis_moves)
